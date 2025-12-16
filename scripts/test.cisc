@@ -1,0 +1,29 @@
+.ram_size 0x00FF
+.name 0x0001
+
+!define my_var 0xFF1
+!const my_const 0xFF00
+
+*Ldi %rdb $0b101    ; fixed native instruction, which requires the exact type of parameter (many more variations, but is the direct instruction used by the hardware/emulator)
+Sto [%rdb + $55] %rdb    ; a 'sudo' instruction, which expands to a single native instruction, simply matching the parameter types to handle the variations between address spaces mostly without needing a bunch of different instruction names (makes it a little easier to read/write)
+Ldi %rdb $49
+Ldi [%rdb] $0x1234
+*Jmp #end_lab
+!header my_header
+    Ldi %rdc $0x4A      ; sudo instruction (auto forms based on parameter types, could end up as one of multiple possible instructions after resolution)
+    *Ret
+!end end_lab
+
+Ldi %rdb $my_const
+Ldi #my_var $my_const
+
+Add %rdb $my_const %rdc
+
+Mov #0x4 #0x50
+Mov %rda % rdb
+
+Add %rda $1 %rdb
+
+*Call #my_header
+
+*Kill

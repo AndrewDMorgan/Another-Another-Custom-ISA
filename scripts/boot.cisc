@@ -1,0 +1,110 @@
+.ram_size 0x0000
+.name 0x0000
+.program_size 0x0000
+
+!header boot_loader
+        ; setting the callback functions
+    *SetTimeoutAdd #schedule_callback
+    *SetIntAddr    #interrupt_callback
+    *SetFaultAddr  #fault_callback
+
+        ; loading the kernel functions.... kinda an import step....
+
+    Ldi %rda $1600  ; low addr
+    Ldi %rdb $0     ; high addr
+    Ldi %rdc $1600  ; start in ram
+    Ldi %rdd $4096  ; size
+    *LoadSeg %rda %rdb %rdc %rdd
+
+    *Jmp #schedule_callback
+
+    ; all programs get equally sized stacks
+    ; a programs priority determines the scheduled runtime duration
+    ; there are up to 16 programs that can run at any given time
+        ; memory allocations:
+    ;   current pg id  - 0
+    ;  Pg Priority     - 512 - 528
+    ;  Pg alloc start  - 528 - 544
+    ;  Pg Ram Size     - 544 - 560
+    ;  Saved Reg State - 560 - 1584
+    ;
+    ;  Default kernel/extra functions: 1600 - 4096
+    ;
+    ;  All programs begin at ram addr 10_000, with a default stack size of 512 addrs
+    ;    * first 512 is stack
+    ;    * the next memory is the memory allocated of ram
+    ;    * then the program begins
+!end kill_cpu
+    *Kill
+
+!header fault_callback
+    ; first setting the current program to no longer be active
+    Get #0 %rda            ; getting current pg id (will be the pointer for zeroing the priority aka deactivating it)
+    Ldi %rdb $0            ; zero value to kill the pg
+    Sto [%rda + $512] %rdb  ; zeroing the priority to deactivate the program
+
+    ; jumping to the schedule callback to pick a new program
+    *Jmp #schedule_callback
+
+!header interrupt_callback
+    *RetInt  ; temp ig
+
+!header schedule_callback
+        ; saving the current program's state (rdz is not safe to be used in programs as it may be overwritten by the kernel during scheduling)
+    Get #0 %rdz        ; getting current pg id
+    Mul %rdz $64 %rdz  ; adjusting since each register set is 64 bytes
+    Add %rdz $560 %rdz ; adding the offset to the saved register area
+    *SaveRegisters %rdz
+    ; move along until: active program, or wrap around and continue
+    Get #0 %rda        ; getting current pg id
+    Add %rda $1 %rda   ; moving to next pg id (so the same program doesn't keep repeating)
+  !loop find_next
+      Get #0 %rda                ; getting current pg id
+        ; checking if it's an active program
+      Get [%rda + $512] %rdb     ; getting the priority of the current pg
+      *Zero %rdb                  ; checking if zero (inactive)
+      *Jnc #found_active        ; if not zero, found an active program
+        ; moving to next pg id, and checking for wrapping (yes, this could loop forever, however, the main os kernel would be responsible to end any deadlocks ig, idk)
+      Add %rda $1 %rda           ; incrementing to next pg id
+      *GrtrImm %rda $15              ; checking for wrap around
+      *Jic #wrap_check_false       ; if no wrap, continue
+        Ldi %rda $0               ; wrapping around to pg id 0
+        *Call #main_kernel    ; calling the main kernel (happens on wrap, ensuring it always has a chance to go)
+    !condition wrap_check_false
+        *Jmp #find_next        ; continue searching
+  !end found_active    ; any errors beyond here may either crash the user program, or introduce security vulnerabilities
+    ; setting the program state up before returning to it
+        ; setting the ram and stack frames and bounds (stack frame size is constant, and therefore fine)
+    ; stack pos is pg_alloc_start
+    ; ram pos is pg_alloc_start + stack_size going till pg_alloc_start + stack_size + pg_ram_size
+    Get #0 %rda                ; getting current pg id
+    Get [%rda + $528] %rdb     ; getting the pg_alloc_start
+    *SetStackFrame %rdb        ; setting stack frame to pg id addr
+    Ldi %rdb $512              ; constant stack size
+    *SetStackSize %rdb         ; setting stack size
+        ; now for ram
+    Add %rdb $512 %rdb         ; adjusting to ram start
+    *SetRamFrame %rdb          ; setting ram frame to start after stack
+    Get [%rda + $544] %rdc     ; getting the pg_ram_size
+    *SetRamSize %rdc           ; setting ram size
+        ; calculating the start of the program space, and the maximum size (2nd byte of program space)
+    Add %rdb %rdc %rdd         ; calculating the program start addr
+    *SetPgrmStart %rdd         ; setting the program addr
+    Get [%rdd + $1] %rdb       ; getting the program size (2nd byte of program space)      kinda insecure, maybe in the further do a bounds check
+    *SetPgrmSize %rdb          ; setting the program size
+        ; loading registers
+    Mul %rda $64 %rda          ; adjusting since each register set is 64 bytes
+    Add %rda $560 %rda         ; adding the offset to the saved register
+        ; getting the program counter from the saved registers (27th index)
+    Get [%rda + $27] %rdz      ; the register save location + 27 (the index of the pgc)
+    *LodRegisters %rda  ; only rdz may now be used beyond here
+        ; setting the programs addr and returning
+    *CallPgrm %rdz
+
+    ; default kernel & functions (the first 512 bytes won't be enough, as that's ~ <= 170 instructions)    this new space is as large as I allocate it to be
+.page 1600  ; the byte index in disc where this bit of code begins
+
+!header main_kernel   ; the main os kernel entry point (can't be done in the generic scheduling setup as it needs protected mode which can't be done there)
+    ;
+    *Ret
+
